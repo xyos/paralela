@@ -10,7 +10,7 @@ typedef struct
         double sum;
 } MyData;
 
-#define N 2 // threads
+#define N 8 // threads
 #define L 10000000 // data for each thread
 
 MyData mData;

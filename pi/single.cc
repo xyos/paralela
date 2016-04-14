@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <sys/time.h>
 
-#define L 10000000 // Iterations
+#define L 80000000 // Iterations
 
 
 
