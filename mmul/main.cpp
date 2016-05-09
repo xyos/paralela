@@ -5,6 +5,10 @@
 #include <random>
 #include <chrono>
 #include <ctime>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 using namespace std;
 using namespace chrono;
@@ -102,6 +106,24 @@ public:
         _data[i * _n + j] = val;
     }
 
+    Mnn forkMult(const Mnn& b, const unsigned int& n_threads){
+        Clock::time_point t1 = Clock::now();
+        vector<float> vec_f;
+        // some code fills vec_f .. 
+        float *shm;
+        int shmid;
+        shmid = shm_open(name, O_CREAT|O_RDWR, 0666);
+        shm = (float *) shmat(shmid, NULL, 0);
+        
+        for(auto f : vec_f) {
+           *shm++ = f;
+        }
+        //Attach to shared memory
+        Clock::time_point t2 = Clock::now();
+        duration<double> time = duration_cast<duration<double>>(t2-t1);
+        printf("**** %d threads time: %f seconds \n", n_threads, time.count());
+        return c;
+    }
 
     Mnn threadMult(const Mnn& b, const unsigned int& n_threads){
         Clock::time_point t1 = Clock::now();
@@ -150,6 +172,6 @@ int main(int argc, const char *argv[])
     b.randomize();
     Mnn c = a * b;
     Mnn d = a.threadMult(b,n_threads);
-    printf("TEST: %s", (c == d) ? "PASS": "FAIL");
+    printf("TEST: %s\n", (c == d) ? "PASS": "FAIL");
     return 0;
 }
