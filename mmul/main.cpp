@@ -228,7 +228,7 @@ int main(int argc, const char *argv[])
         Mnn d = a.threadMult(b,n_threads);
         printf("TEST: %s\n", (c == d) ? "PASS": "FAIL");
     }
-    vector<int> forks = {2,4,8,16};
+    vector<int> forks = {2,4,8,16,32};
     for(const auto& n_forks: forks){
         Mnn e = a.forkMult(b,n_forks);
         printf("TEST: %s\n", (c == e) ? "PASS": "FAIL");
