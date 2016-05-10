@@ -1,18 +1,24 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <vector>
-#include <thread>
-#include <random>
 #include <chrono>
 #include <ctime>
+#include <iostream>
+#include <mutex>
+#include <random>
+#include <sys/shm.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ipc.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
+#include <vector>
 
 using namespace std;
 using namespace chrono;
 typedef high_resolution_clock Clock;
+mutex arr_mutex;
+int shm_id;
 
 class Mnn {
 private:
@@ -31,6 +37,11 @@ public:
     }
     int get_data_size()const {
         return _data.size();
+    }
+    void set_data(double* arr){
+        for (int i = 0; i < _data.size(); i++) {
+            _data[i] = arr[i];
+        }
     }
 
     // returns index from given row and col
@@ -101,27 +112,69 @@ public:
             _data[i] = distribution(generator);
         }
     }
+    void _loopFork(const int& t_forks, const int& n_forks, const Mnn& b){
+        double* arr = (double*)shmat(shm_id, NULL, 0);
+        const Mnn *a = this;
+        for (unsigned int i=t_forks; i<_data.size(); i+=n_forks) {
+            int row = i/b.get_n();
+            int col = i-(row*b.get_n());
+            for(int rm = 0; rm < b.get_n(); rm++){
+                arr_mutex.lock();
+                arr[row * _n + col] += (*a)(row,rm) * b(rm,col);
+                arr_mutex.unlock();
+            }
+        }
+    }
 
-    void set_row(const int& i, const int& j, double val){
-        _data[i * _n + j] = val;
+    void _fork(const int& n_forks,  const Mnn& b){
+        int pid;
+        int status;
+        int mod;
+
+        for(int i=0; i<n_forks; i++){
+            pid = fork();
+            if(pid == -1){
+                //error handling
+            }
+            else if(pid == 0){
+                //child, do something
+                _loopFork(i, n_forks, b);
+                exit(0);
+            }
+            else{ //parent
+            }
+        }
+        // Need to wait for all
+        for(int i=0; i<n_forks; i++){
+            wait(NULL);
+        }
+        wait(NULL);
+
     }
 
     Mnn forkMult(const Mnn& b, const unsigned int& n_threads){
         Clock::time_point t1 = Clock::now();
-        vector<float> vec_f;
-        // some code fills vec_f .. 
-        float *shm;
-        int shmid;
-        shmid = shm_open(name, O_CREAT|O_RDWR, 0666);
-        shm = (float *) shmat(shmid, NULL, 0);
-        
-        for(auto f : vec_f) {
-           *shm++ = f;
+        int n_forks = n_threads;
+
+        key_t key;
+        key=ftok("matrix_c",1);
+        shm_id = shmget(key, _data.size()*sizeof(double), 0666 | IPC_CREAT);
+        double* arr = (double*)shmat(shm_id, NULL, 0);
+        for (int i = 0; i < _data.size(); i++) {
+            arr[i] = 0.0;
         }
+        int t_forks = n_forks;
+        int status;
+        _fork(n_forks, b);
         //Attach to shared memory
         Clock::time_point t2 = Clock::now();
+        Mnn c(_n);
+        c.set_data(arr);
+        /* Deallocate the shared memory segment.  */ 
+        shmdt (arr); 
+        shmctl (shm_id, IPC_RMID, 0); 
         duration<double> time = duration_cast<duration<double>>(t2-t1);
-        printf("**** %d threads time: %f seconds \n", n_threads, time.count());
+        printf("**** %d processes time: %f seconds \n", n_threads, time.count());
         return c;
     }
 
@@ -164,14 +217,21 @@ public:
 
 int main(int argc, const char *argv[])
 {
-    unsigned int m_size  = atoi(argv[1]),
-                 n_threads = atoi(argv[2]);
-    printf("running for n:%d and threads:%d\n\n", m_size, n_threads);
+    unsigned int m_size  = atoi(argv[1]);
+    printf("running for n:%d \n\n", m_size);
     Mnn a(m_size), b(m_size);
     a.randomize();
     b.randomize();
     Mnn c = a * b;
-    Mnn d = a.threadMult(b,n_threads);
-    printf("TEST: %s\n", (c == d) ? "PASS": "FAIL");
+    vector<int> threads = {2,4,8,16,32,64,128,256,512,1024};
+    for(const auto& n_threads: threads){
+        Mnn d = a.threadMult(b,n_threads);
+        printf("TEST: %s\n", (c == d) ? "PASS": "FAIL");
+    }
+    vector<int> forks = {2,4,8,16};
+    for(const auto& n_forks: forks){
+        Mnn e = a.forkMult(b,n_forks);
+        printf("TEST: %s\n", (c == e) ? "PASS": "FAIL");
+    }
     return 0;
 }
