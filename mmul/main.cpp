@@ -1,225 +1,117 @@
-#include <chrono>
-#include <ctime>
-#include <iostream>
-#include <mutex>
-#include <random>
-#include <sys/shm.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/ipc.h>
-#include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <thread>
-#include <unistd.h>
+#include "Matrix.hpp"
 #include <vector>
+#include <iostream>
 
-using namespace std;
-using namespace chrono;
-typedef high_resolution_clock Clock;
-mutex arr_mutex;
-int shm_id;
-
-class Mnn {
-private:
-    vector<double> _data;
-    int _n;
-public:
-    Mnn(const int &n) {
-        _n = n;
-        _data.resize(_n*_n);
-        fill(_data.begin(),_data.end(),0.0);
+// Matrix multiplication - Host code
+// Matrix dimensions are assumed to be multiples of BLOCK_SIZE
+void MatMul(const Mnn A, const Mnn B, Matrix C) {
+    // Load _n and _nn to device memory
+    int d_n;
+    int d_nn;
+    cudaError_t err = cudaMalloc(d_n, sizeof(int));
+    printf("CUDA malloc d_n: %s\n",cudaGetErrorString(err));
+    cudaMemcpy(d_n, A.get_n(), sizeof(int), cudaMemcpyHostToDevice);
+    cudaError_t err = cudaMalloc(d_nn, sizeof(int));
+    printf("CUDA malloc d_nn: %s\n",cudaGetErrorString(err));
+    cudaMemcpy(d_n, A.get_data_size(), sizeof(int), cudaMemcpyHostToDevice);
+    // Load A data to device memory
+    size_t size = A.get_data_size() * sizeof(float);
+    float* a_data;
+    cudaError_t err = cudaMalloc(&a_data, size);
+    printf("CUDA malloc A: %s\n",cudaGetErrorString(err));
+    cudaMemcpy(a_data, A._data, size, cudaMemcpyHostToDevice);
+    // Load B data to device memory
+    float* b_data;
+    cudaError_t err = cudaMalloc(&b_data, size);
+    printf("CUDA malloc B: %s\n",cudaGetErrorString(err));
+    cudaMemcpy(b_data, B._data, size, cudaMemcpyHostToDevice);
+    // Allocate C in device memory
+    float* c_data;
+    cudaError_t err = cudaMalloc(&c_data, size);
+    printf("CUDA malloc C: %s\n",cudaGetErrorString(err));
+    cudaMemcpy(c_data, C._data, size, cudaMemcpyHostToDevice);
+    // Invoke kernel
+    dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 dimGrid(B.width / dimBlock.x, A.height / dimBlock.y);
+    MatMulKernel<<<dimGrid, dimBlock>>>(a_data, b_data, c_data);
+    err = cudaThreadSynchronize();
+    printf("Run kernel: %s\n", cudaGetErrorString(err));
+    // Read C from device memory
+    err = cudaMemcpy(C._data, c_data, size, cudaMemcpyDeviceToHost);
+    printf("Copy C off of device: %s\n",cudaGetErrorString(err));
+    // Free device memory
+    cudaFree(d_n);
+    cudaFree(d_nn);
+    cudaFree(a_data);
+    cudaFree(b_data);
+    cudaFree(c_data);
+}
+// Get a matrix element
+__device__ float GetElement(const float* data, const int n, int row, int col) {
+    return data[row * n + col];
+}
+// Set a matrix element
+__device__ void SetElement(float* data, int n, int row, int col, float value) {
+    data[row * n + col] = value;
+}
+// Get the BLOCK_SIZExBLOCK_SIZE sub-matrix Asub of A that is
+// located col sub-matrices to the right and row sub-matrices down
+// from the upper-left corner of A
+__device__ float* GetSubMatrix(float* data, int n, int row, int col) {
+    float* sub_data;
+    sub_data = data[n * BLOCK_SIZE * row + BLOCK_SIZE * col];
+    return sub_data;
+}
+// Matrix multiplication kernel called by MatMul()
+__global__ void MatMulKernel(float* a_data, float* b_data, float* c_data, int n) {
+    // Block row and column
+    int blockRow = blockIdx.y;
+    int blockCol = blockIdx.x;
+    // Each thread block computes one sub-matrix Csub of C
+    float* c_sub = GetSubMatrix(c_data, blockRow, blockCol);
+    // Each thread computes one element of c_sub
+    // by accumulating results into c_value
+    float c_value = 0.0;
+    // Thread row and column within c_sub
+    int row = threadIdx.y;
+    int col = threadIdx.x;
+    // Loop over all the sub-matrices of a_ and b_ that are
+    // required to compute c_sub
+    // Multiply each pair of sub-matrices together
+    // and accumulate the results
+    for (int m = 0; m < (n / b_LOCK_SIZE); ++m) {
+        // Get sub-matrix a_sub of A
+        Matrix a_sub = GetSubMatrix(A, blockRow, m);
+        // Get sub-matrix b_sub of B
+        Matrix b_sub = GetSubMatrix(B, m, blockCol);
+        // Shared memory used to store a_sub and b_sub respectively
+        __shared__ float a_s[BLOCK_SIZE][BLOCK_SIZE];
+        __shared__ float b_s[BLOCK_SIZE][BLOCK_SIZE];
+        // Load a_sub and b_sub from device memory to shared memory
+        // Each thread loads one element of each sub-matrix
+        a_s[row][col] = GetElement(a_sub, row, col);
+        b_s[row][col] = GetElement(b_sub, row, col);
+        // Synchronize to make sure the sub-matrices are loaded
+        // before starting the computation
+        __syncthreads();
+        // Multiply a_sub and b_sub together
+        for (int e = 0; e < BLOCK_SIZE; ++e)
+            c_value += a_s[row][e] * b_s[e][col];
+        // Synchronize to make sure that the preceding
+        // computation is done before loading two new
+        // sub-matrices of a_ and b_ in the next iteration
+        __syncthreads();
     }
-
-    // returns size n of matrix
-    int get_n()const {
-        return _n;
-    }
-    int get_data_size()const {
-        return _data.size();
-    }
-    void set_data(double* arr){
-        for (int i = 0; i < _data.size(); i++) {
-            _data[i] = arr[i];
-        }
-    }
-
-    // returns index from given row and col
-    double operator()(const int& row, const int& col)const {
-        return _data[row * _n + col];
-    }
-    double &operator()(const int& row, const int& col) {
-        return _data[row * _n + col];
-    }
-    // returns index i of data vector
-    double &operator[](const int& i){
-        return _data[i];
-    }
-    double operator[](const int& i)const{
-        return _data[i];
-    }
-    void operator=(const Mnn &m){
-        _n = m._n;
-        _data.resize(_n*_n);
-        std::copy(m._data.begin(), m._data.end(),_data.begin());
-    }
-    // computes a == b where a is this, returns if a and b are equal
-    bool operator==(const Mnn &b) {
-        if(_n != b.get_n()) return false;
-        for (int i = 0; i < _data.size(); i++) {
-            if(_data[i] != b[i]){
-                return false;
-            }
-        }
-        return true;
-    }
-
-
-    // computes a * b where a is this, returns result
-    Mnn operator*(const Mnn& b)const{
-        Clock::time_point t1 = Clock::now();
-        Mnn result(b.get_n());
-        const Mnn *a = this;
-        for (int i = 0; i < _n; i++) {
-            for (int j = 0; j < _n; j++) {
-               for (int k = 0; k < _n; k++) {
-                   result(i,j) += (*this)(i,k) * b(k,j);
-               }
-            }
-        }
-        Clock::time_point t2 = Clock::now();
-        duration<double> time = duration_cast<duration<double>>(t2-t1);
-        printf("---- single thread time: %f seconds \n", time.count());
-        return result;
-    }
-
-    void identity() {
-        for (int i = 0; i < _n; i++) {
-            for (int j = 0; j < _n; j++) {
-                if(i==j){
-                    (*this)(i,j) = 1.0;
-                }
-            }
-        }
-    }
-
-    void randomize(){
-        // Mersene Twister
-        mt19937 generator;
-        generator.seed(random_device{}());
-        uniform_real_distribution<double> distribution(-1.0,1.0);
-        for (int i = 0; i < _data.size(); i++) {
-            _data[i] = distribution(generator);
-        }
-    }
-    void _loopFork(const int& t_forks, const int& n_forks, const Mnn& b){
-        double* arr = (double*)shmat(shm_id, NULL, 0);
-        const Mnn *a = this;
-        for (unsigned int i=t_forks; i<_data.size(); i+=n_forks) {
-            int row = i/b.get_n();
-            int col = i-(row*b.get_n());
-            for(int rm = 0; rm < b.get_n(); rm++){
-                arr_mutex.lock();
-                arr[row * _n + col] += (*a)(row,rm) * b(rm,col);
-                arr_mutex.unlock();
-            }
-        }
-    }
-
-    void _fork(const int& n_forks,  const Mnn& b){
-        int pid;
-        int status;
-        int mod;
-
-        for(int i=0; i<n_forks; i++){
-            pid = fork();
-            if(pid == -1){
-                //error handling
-            }
-            else if(pid == 0){
-                //child, do something
-                _loopFork(i, n_forks, b);
-                exit(0);
-            }
-            else{ //parent
-            }
-        }
-        // Need to wait for all
-        for(int i=0; i<n_forks; i++){
-            wait(NULL);
-        }
-        wait(NULL);
-
-    }
-
-    Mnn forkMult(const Mnn& b, const unsigned int& n_threads){
-        Clock::time_point t1 = Clock::now();
-        int n_forks = n_threads;
-
-        key_t key;
-        key=ftok("matrix_c",1);
-        shm_id = shmget(key, _data.size()*sizeof(double), 0666 | IPC_CREAT);
-        double* arr = (double*)shmat(shm_id, NULL, 0);
-        for (int i = 0; i < _data.size(); i++) {
-            arr[i] = 0.0;
-        }
-        int t_forks = n_forks;
-        int status;
-        _fork(n_forks, b);
-        //Attach to shared memory
-        Clock::time_point t2 = Clock::now();
-        Mnn c(_n);
-        c.set_data(arr);
-        /* Deallocate the shared memory segment.  */ 
-        shmdt (arr); 
-        shmctl (shm_id, IPC_RMID, 0); 
-        duration<double> time = duration_cast<duration<double>>(t2-t1);
-        printf("**** %d processes time: %f seconds \n", n_threads, time.count());
-        return c;
-    }
-
-    Mnn threadMult(const Mnn& b, const unsigned int& n_threads){
-        Clock::time_point t1 = Clock::now();
-        Mnn c(_n);
-        const Mnn *a = this;
-        const int size = _data.size();
-
-        vector<thread> threads;
-        for (unsigned int id = 0; id < n_threads ; id++) {
-            threads.push_back(thread([id,a,b,&c,size,n_threads](){
-                for (unsigned int i=id; i<size; i+=n_threads) {
-                    int row = i/c.get_n();
-                    int col = i-(row*c.get_n());
-                    for(int rm = 0; rm < c.get_n(); rm++){
-                        c(row,col) += (*a)(row,rm) * b(rm,col);
-                    }
-                }
-            }));
-        }
-        for (auto& t : threads){
-            t.join();
-        }
-        Clock::time_point t2 = Clock::now();
-        duration<double> time = duration_cast<duration<double>>(t2-t1);
-        printf("**** %d threads time: %f seconds \n", n_threads, time.count());
-        return c;
-    }
-
-    void print(){
-        for (int i = 0; i < _n; i++) {
-            for (int j = 0; j < _n; j++) {
-                printf("%f ", (*this)(i,j));
-            }
-            printf("\n");
-        }
-    }
-};
+    // Write c_sub to device memory
+    // Each thread writes one element
+    SetElement(c_sub, row, col, c_value);
+}
 
 int main(int argc, const char *argv[])
 {
     unsigned int m_size  = atoi(argv[1]);
     printf("running for n:%d \n\n", m_size);
-    Mnn a(m_size), b(m_size);
+    Mnn a(m_size), b(m_size), f(m_size);
     a.randomize();
     b.randomize();
     Mnn c = a * b;
@@ -228,10 +120,12 @@ int main(int argc, const char *argv[])
         Mnn d = a.threadMult(b,n_threads);
         printf("TEST: %s\n", (c == d) ? "PASS": "FAIL");
     }
-    vector<int> forks = {2,4,8,16,32};
+    vector<int> forks = {2,4,8,16,32,64,128};
     for(const auto& n_forks: forks){
         Mnn e = a.forkMult(b,n_forks);
+        e.print();
         printf("TEST: %s\n", (c == e) ? "PASS": "FAIL");
     }
+    MatMul(a, b, f);
     return 0;
 }
