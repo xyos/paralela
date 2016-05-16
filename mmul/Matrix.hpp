@@ -106,7 +106,9 @@ public:
     bool operator==(const Mnn &b) {
         if(_n != b.get_n()) return false;
         for (int i = 0; i < _nn; i++) {
-            if(_data[i] != b[i]){
+            float e = _data[i] - b[i];
+            if(e > 0.0001){
+		printf("test failed for i:%i err:%f\n" , i, e);
                 return false;
             }
         }
