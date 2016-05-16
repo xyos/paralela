@@ -42,8 +42,6 @@ private:
 
     void _fork(const int& n_forks,  const Mnn& b){
         int pid;
-        int status;
-        int mod;
 
         for(int i=0; i<n_forks; i++){
             pid = fork();
@@ -120,7 +118,6 @@ public:
     Mnn operator*(const Mnn& b)const{
         Clock::time_point t1 = Clock::now();
         Mnn result(b.get_n());
-        const Mnn *a = this;
         for (int i = 0; i < _n; i++) {
             for (int j = 0; j < _n; j++) {
                for (int k = 0; k < _n; k++) {
@@ -165,8 +162,6 @@ public:
         for (int i = 0; i < _nn; i++) {
             arr[i] = 0.0;
         }
-        int t_forks = n_forks;
-        int status;
         _fork(n_forks, b);
         //Attach to shared memory
         Clock::time_point t2 = Clock::now();

@@ -5,50 +5,6 @@
 #include <vector>
 #include <iostream>
 #define BLOCK_SIZE 16
-// Matrix multiplication - Host code
-// Matrix dimensions are assumed to be multiples of BLOCK_SIZE
-void MatMul(const Mnn A, const Mnn B, Mnn C) {
-    // Load _n and _nn to device memory
-    int d_n;
-    int d_nn;
-    cudaError_t err = cudaMalloc(d_n, sizeof(int));
-    printf("CUDA malloc d_n: %s\n",cudaGetErrorString(err));
-    cudaMemcpy(d_n, A.get_n(), sizeof(int), cudaMemcpyHostToDevice);
-    cudaError_t err = cudaMalloc(d_nn, sizeof(int));
-    printf("CUDA malloc d_nn: %s\n",cudaGetErrorString(err));
-    cudaMemcpy(d_n, A.get_data_size(), sizeof(int), cudaMemcpyHostToDevice);
-    // Load A data to device memory
-    size_t size = A.get_data_size() * sizeof(float);
-    float* a_data;
-    cudaError_t err = cudaMalloc(&a_data, size);
-    printf("CUDA malloc A: %s\n",cudaGetErrorString(err));
-    cudaMemcpy(a_data, A._data, size, cudaMemcpyHostToDevice);
-    // Load B data to device memory
-    float* b_data;
-    cudaError_t err = cudaMalloc(&b_data, size);
-    printf("CUDA malloc B: %s\n",cudaGetErrorString(err));
-    cudaMemcpy(b_data, B._data, size, cudaMemcpyHostToDevice);
-    // Allocate C in device memory
-    float* c_data;
-    cudaError_t err = cudaMalloc(&c_data, size);
-    printf("CUDA malloc C: %s\n",cudaGetErrorString(err));
-    cudaMemcpy(c_data, C._data, size, cudaMemcpyHostToDevice);
-    // Invoke kernel
-    dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
-    dim3 dimGrid(B.width / dimBlock.x, A.height / dimBlock.y);
-    MatMulKernel<<<dimGrid, dimBlock>>>(a_data, b_data, c_data);
-    err = cudaThreadSynchronize();
-    printf("Run kernel: %s\n", cudaGetErrorString(err));
-    // Read C from device memory
-    err = cudaMemcpy(C._data, c_data, size, cudaMemcpyDeviceToHost);
-    printf("Copy C off of device: %s\n",cudaGetErrorString(err));
-    // Free device memory
-    cudaFree(d_n);
-    cudaFree(d_nn);
-    cudaFree(a_data);
-    cudaFree(b_data);
-    cudaFree(c_data);
-}
 // Get a matrix element
 __device__ float getElement(const float* data, const int n, int row, int col) {
     return data[row * n + col];
@@ -61,8 +17,8 @@ __device__ void setElement(float* data, int n, int row, int col, float value) {
 // located col sub-matrices to the right and row sub-matrices down
 // from the upper-left corner of A
 __device__ float* GetSubMatrix(float* data, int n, int row, int col) {
-    float* sub_data;
-    sub_data = data[n * BLOCK_SIZE * row + BLOCK_SIZE * col];
+    float *sub_data;
+    sub_data = &data[n * BLOCK_SIZE * row + BLOCK_SIZE * col];
     return sub_data;
 }
 // Matrix multiplication kernel called by MatMul()
@@ -109,6 +65,53 @@ __global__ void MatMulKernel(float* a_data, float* b_data, float* c_data, int n)
     // Each thread writes one element
     setElement(c_sub, n, row, col, c_value);
 }
+// Matrix multiplication - Host code
+// Matrix dimensions are assumed to be multiples of BLOCK_SIZE
+void MatMul(const Mnn A, const Mnn B, Mnn C) {
+    // Load _n and _nn to device memory
+    int* d_n;
+    int* d_nn;
+    size_t int_size = sizeof(int);
+    cudaError_t err = cudaMalloc(&d_n, int_size);
+    printf("CUDA malloc d_n: %s\n",cudaGetErrorString(err));
+    int n = A.get_n();
+    cudaMemcpy(d_n, &n, int_size, cudaMemcpyHostToDevice);
+    err = cudaMalloc(&d_nn, int_size);
+    printf("CUDA malloc d_nn: %s\n",cudaGetErrorString(err));
+    int nn = A.get_data_size();
+    cudaMemcpy(d_n, &nn, int_size, cudaMemcpyHostToDevice);
+    // Load A data to device memory
+    size_t size = A.get_data_size() * sizeof(float);
+    float* a_data;
+    err = cudaMalloc(&a_data, size);
+    printf("CUDA malloc A: %s\n",cudaGetErrorString(err));
+    cudaMemcpy(a_data, A._data, size, cudaMemcpyHostToDevice);
+    // Load B data to device memory
+    float* b_data;
+    err = cudaMalloc(&b_data, size);
+    printf("CUDA malloc B: %s\n",cudaGetErrorString(err));
+    cudaMemcpy(b_data, B._data, size, cudaMemcpyHostToDevice);
+    // Allocate C in device memory
+    float* c_data;
+    err = cudaMalloc(&c_data, size);
+    printf("CUDA malloc C: %s\n",cudaGetErrorString(err));
+    cudaMemcpy(c_data, C._data, size, cudaMemcpyHostToDevice);
+    // Invoke kernel
+    dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 dimGrid(n / dimBlock.x, n / dimBlock.y);
+    MatMulKernel<<<dimGrid, dimBlock>>>(a_data, b_data, c_data, n);
+    err = cudaThreadSynchronize();
+    printf("Run kernel: %s\n", cudaGetErrorString(err));
+    // Read C from device memory
+    err = cudaMemcpy(C._data, c_data, size, cudaMemcpyDeviceToHost);
+    printf("Copy C off of device: %s\n",cudaGetErrorString(err));
+    // Free device memory
+    cudaFree(d_n);
+    cudaFree(d_nn);
+    cudaFree(a_data);
+    cudaFree(b_data);
+    cudaFree(c_data);
+}
 
 int main(int argc, const char *argv[])
 {
@@ -126,9 +129,12 @@ int main(int argc, const char *argv[])
     vector<int> forks = {2,4,8,16,32,64,128};
     for(const auto& n_forks: forks){
         Mnn e = a.forkMult(b,n_forks);
-        e.print();
         printf("TEST: %s\n", (c == e) ? "PASS": "FAIL");
     }
     MatMul(a, b, f);
+    c.print();
+    printf("-------------------------------------\n");
+    f.print();
+    printf("TEST: %s\n", (c == f) ? "PASS": "FAIL");
     return 0;
 }
