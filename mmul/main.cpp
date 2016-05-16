@@ -1,10 +1,13 @@
 #include "Matrix.hpp"
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <cuda_runtime_api.h>
 #include <vector>
 #include <iostream>
-
+#define BLOCK_SIZE 16
 // Matrix multiplication - Host code
 // Matrix dimensions are assumed to be multiples of BLOCK_SIZE
-void MatMul(const Mnn A, const Mnn B, Matrix C) {
+void MatMul(const Mnn A, const Mnn B, Mnn C) {
     // Load _n and _nn to device memory
     int d_n;
     int d_nn;
@@ -47,11 +50,11 @@ void MatMul(const Mnn A, const Mnn B, Matrix C) {
     cudaFree(c_data);
 }
 // Get a matrix element
-__device__ float GetElement(const float* data, const int n, int row, int col) {
+__device__ float getElement(const float* data, const int n, int row, int col) {
     return data[row * n + col];
 }
 // Set a matrix element
-__device__ void SetElement(float* data, int n, int row, int col, float value) {
+__device__ void setElement(float* data, int n, int row, int col, float value) {
     data[row * n + col] = value;
 }
 // Get the BLOCK_SIZExBLOCK_SIZE sub-matrix Asub of A that is
@@ -68,7 +71,7 @@ __global__ void MatMulKernel(float* a_data, float* b_data, float* c_data, int n)
     int blockRow = blockIdx.y;
     int blockCol = blockIdx.x;
     // Each thread block computes one sub-matrix Csub of C
-    float* c_sub = GetSubMatrix(c_data, blockRow, blockCol);
+    float* c_sub = GetSubMatrix(c_data, n, blockRow, blockCol);
     // Each thread computes one element of c_sub
     // by accumulating results into c_value
     float c_value = 0.0;
@@ -79,18 +82,18 @@ __global__ void MatMulKernel(float* a_data, float* b_data, float* c_data, int n)
     // required to compute c_sub
     // Multiply each pair of sub-matrices together
     // and accumulate the results
-    for (int m = 0; m < (n / b_LOCK_SIZE); ++m) {
+    for (int m = 0; m < (n / BLOCK_SIZE); ++m) {
         // Get sub-matrix a_sub of A
-        Matrix a_sub = GetSubMatrix(A, blockRow, m);
+        float* a_sub = GetSubMatrix(a_data, n, blockRow, m);
         // Get sub-matrix b_sub of B
-        Matrix b_sub = GetSubMatrix(B, m, blockCol);
+        float* b_sub = GetSubMatrix(b_data, n, m, blockCol);
         // Shared memory used to store a_sub and b_sub respectively
         __shared__ float a_s[BLOCK_SIZE][BLOCK_SIZE];
         __shared__ float b_s[BLOCK_SIZE][BLOCK_SIZE];
         // Load a_sub and b_sub from device memory to shared memory
         // Each thread loads one element of each sub-matrix
-        a_s[row][col] = GetElement(a_sub, row, col);
-        b_s[row][col] = GetElement(b_sub, row, col);
+        a_s[row][col] = getElement(a_sub, n, row, col);
+        b_s[row][col] = getElement(b_sub, n, row, col);
         // Synchronize to make sure the sub-matrices are loaded
         // before starting the computation
         __syncthreads();
@@ -104,7 +107,7 @@ __global__ void MatMulKernel(float* a_data, float* b_data, float* c_data, int n)
     }
     // Write c_sub to device memory
     // Each thread writes one element
-    SetElement(c_sub, row, col, c_value);
+    setElement(c_sub, n, row, col, c_value);
 }
 
 int main(int argc, const char *argv[])
